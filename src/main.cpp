@@ -1,3 +1,37 @@
+#include <Arduino.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <Wire.h>
+
+// Se LiquidCrystal_I2C.h non funziona, decommenta questo:
+// #include <LiquidCrystal.h>  // Libreria standard
+// #include <PCF8574.h>        // Per I2C expander
+
+/*
+ * TERMOSTATO INTELLIGENTE ESP32 - PlatformIO + Relay Optoisolati
+ * Framework: Arduino per ESP32
+ * Platform: Espressif32
+ * 
+ * COMPONENTI HARDWARE:
+ * - ESP32-WROOM-32 (DevKit)
+ * - LCD I2C 16x2 (PCF8574 backpack)
+ * - Encoder rotativo KY-040
+ * - Modulo relay 2 canali OPTOISOLATI (GTZ817C)
+ * - Sensore DS18B20 OneWire
+ * 
+ * FEATURES:
+ * - Controllo temperatura con isteresi configurabile
+ * - Menu navigabile con encoder rotativo
+ * - Salvataggio configurazione in EEPROM
+ * - Sistema di sicurezza relay optoisolati
+ * - Monitoraggio I2C automatico
+ * - Logica invertita per optoaccoppiatori GTZ817C
+ */
+
+// ===== FORWARD DECLARATIONS per PlatformIO =====
+// Hardware setup functions
 void setupHardware();
 void setupLCD();
 void setupTemperatureSensor();
@@ -12,7 +46,7 @@ void saveConfiguration();
 // Temperature control
 void updateTemperatureReading();
 void controlThermostatLogic();
-void updateRelayState(int relayPin, bool shouldActivate, bool &currentState, const char* relayName);
+void updateRelayState(int, bool, bool&, const char*);
 void deactivateAllRelays();
 
 // Input handling
@@ -43,6 +77,7 @@ void displaySystemStateSetting();
 #define ENCODER_DT   26
 #define ENCODER_SW   27
 
+
 // Sensore temperatura DS18B20 (OneWire)
 #define TEMP_SENSOR_PIN  19
 
@@ -57,7 +92,7 @@ void displaySystemStateSetting();
 #define TEMP_READ_INTERVAL    2000    // ms - intervallo lettura temperatura
 #define DISPLAY_UPDATE_INTERVAL 500   // ms - aggiornamento display
 #define DEBOUNCE_DELAY        50      // ms - debounce encoder
-#define ENCODER_INTERRUPT_DEBOUNCE 5  // ms - debounce interrupt
+#define ENCODER_INTERRUPT_DEBOUNCE 15  // ms - debounce interrupt
 
 #define TEMP_MIN             10.0f    // °C - temperatura minima configurabile
 #define TEMP_MAX             35.0f    // °C - temperatura massima configurabile
@@ -122,19 +157,38 @@ bool inSubMenu = false;
 
 // ===== INTERRUPT HANDLERS =====
 void IRAM_ATTR encoderRotationISR() {
-  static unsigned long lastInterruptTime = 0;
   unsigned long currentTime = millis();
   
-  // Protezione debounce hardware
-  if (currentTime - lastInterruptTime > ENCODER_INTERRUPT_DEBOUNCE) {
-    if (digitalRead(ENCODER_DT) == HIGH) {
+  // Debounce più aggressivo per encoder meccanici
+  if (currentTime - lastInterruptTime < ENCODER_INTERRUPT_DEBOUNCE) {
+    return;
+  }
+  
+  // Lettura stato attuale dei pin
+  bool currentCLK = digitalRead(ENCODER_CLK);
+  bool currentDT = digitalRead(ENCODER_DT);
+  
+  // Rilevamento fronte di salita su CLK (trigger principale)
+  if (currentCLK != lastCLK && currentCLK == HIGH) {
+    // Quadrature encoding: determina direzione basata su DT
+    if (currentDT == LOW) {
+      // Senso orario → incrementa
       encoderPosition++;
     } else {
+      // Senso antiorario → decrementa  
       encoderPosition--;
     }
+    
     encoderChanged = true;
     lastInterruptTime = currentTime;
+    
+    // Debug opzionale (rimuovi dopo test)
+    // Serial.printf("ENC: CLK=%d, DT=%d, Pos=%d\n", currentCLK, currentDT, encoderPosition);
   }
+  
+  // Aggiorna stati precedenti
+  lastCLK = currentCLK;
+  lastDT = currentDT;
 }
 
 // ===== FUNZIONI DI SETUP =====
@@ -147,9 +201,9 @@ void setupHardware() {
   Serial.printf("🔌 I2C inizializzato - SDA:%d, SCL:%d\n", I2C_SDA, I2C_SCL);
   
   // Configurazione pin digitali
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
-  pinMode(ENCODER_SW, INPUT_PULLUP);
+  pinMode(ENCODER_CLK, INPUT);
+  pinMode(ENCODER_DT, INPUT);
+  pinMode(ENCODER_SW, INPUT);
   pinMode(RELAY_HEATER, OUTPUT);
   pinMode(RELAY_COOLER, OUTPUT);
   pinMode(LED_STATUS, OUTPUT);
