@@ -5,29 +5,29 @@
 #include <EEPROM.h>
 #include <Wire.h>
 
-// Se LiquidCrystal_I2C.h non funziona, decommenta questo:
-// #include <LiquidCrystal.h>  // Libreria standard
-// #include <PCF8574.h>        // Per I2C expander
-
 /*
  * TERMOSTATO INTELLIGENTE ESP32 - PlatformIO + Relay Optoisolati
  * Framework: Arduino per ESP32
  * Platform: Espressif32
  * 
+ * VERSIONE CON ENCODER POLLING (risolve problemi alta velocità)
+ * Pull-up esterne 4.7kΩ per stabilità massima
+ * 
  * COMPONENTI HARDWARE:
  * - ESP32-WROOM-32 (DevKit)
  * - LCD I2C 16x2 (PCF8574 backpack)
- * - Encoder rotativo KY-040
+ * - Encoder rotativo KY-040 + resistenze pull-up 4.7kΩ
  * - Modulo relay 2 canali OPTOISOLATI (GTZ817C)
  * - Sensore DS18B20 OneWire
  * 
  * FEATURES:
  * - Controllo temperatura con isteresi configurabile
- * - Menu navigabile con encoder rotativo
+ * - Menu navigabile con encoder rotativo (POLLING - alta velocità)
  * - Salvataggio configurazione in EEPROM
  * - Sistema di sicurezza relay optoisolati
  * - Monitoraggio I2C automatico
  * - Logica invertita per optoaccoppiatori GTZ817C
+ * - Direzione corretta: ORARIO = +, ANTIORARIO = -
  */
 
 // ===== FORWARD DECLARATIONS per PlatformIO =====
@@ -49,11 +49,11 @@ void controlThermostatLogic();
 void updateRelayState(int, bool, bool&, const char*);
 void deactivateAllRelays();
 
-// Input handling
+// Input handling - POLLING VERSION
+void readEncoderPolling();
 void handleEncoderInput();
 void processEncoderRotation();
 void processButtonPress();
-void IRAM_ATTR encoderRotationISR();
 
 // Display management
 void updateDisplayContent();
@@ -72,11 +72,10 @@ void displaySystemStateSetting();
 // LCD I2C Address (tipicamente 0x27 o 0x3F)
 #define LCD_I2C_ADDRESS  0x27
 
-// Encoder rotativo KY-040 (connessione diretta)
+// Encoder rotativo KY-040 (connessione diretta + pull-up esterne 4.7kΩ)
 #define ENCODER_CLK  25
 #define ENCODER_DT   26
 #define ENCODER_SW   27
-
 
 // Sensore temperatura DS18B20 (OneWire)
 #define TEMP_SENSOR_PIN  19
@@ -91,8 +90,8 @@ void displaySystemStateSetting();
 // ===== CONFIGURAZIONI SISTEMA =====
 #define TEMP_READ_INTERVAL    2000    // ms - intervallo lettura temperatura
 #define DISPLAY_UPDATE_INTERVAL 500   // ms - aggiornamento display
-#define DEBOUNCE_DELAY        50      // ms - debounce encoder
-#define ENCODER_INTERRUPT_DEBOUNCE 15  // ms - debounce interrupt
+#define DEBOUNCE_DELAY        50      // ms - debounce pulsante encoder
+#define ENCODER_POLLING_INTERVAL 8    // ms - polling encoder ottimizzato (125Hz)
 
 #define TEMP_MIN             10.0f    // °C - temperatura minima configurabile
 #define TEMP_MAX             35.0f    // °C - temperatura massima configurabile
@@ -133,13 +132,18 @@ bool temperatureSensorError = false;
 unsigned long lastTemperatureRead = 0;
 unsigned long lastDisplayUpdate = 0;
 
-// Variabili encoder con protezione interrupt
-volatile int encoderPosition = 0;
-volatile bool encoderChanged = false;
+// Variabili encoder POLLING VERSION (NON più volatile)
+int encoderPosition = 0;
+bool encoderChanged = false;
 int lastEncoderPosition = 0;
 bool buttonPressed = false;
 bool lastButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
+
+// Variabili specifiche per polling encoder
+bool lastCLKState = HIGH;
+bool lastDTState = HIGH;
+unsigned long lastEncoderPoll = 0;
 
 // Sistema menu multi-livello
 enum MenuState {
@@ -155,42 +159,6 @@ MenuState currentMenuState = MAIN_DISPLAY;
 int menuSelectionIndex = 0;
 bool inSubMenu = false;
 
-// ===== INTERRUPT HANDLERS =====
-void IRAM_ATTR encoderRotationISR() {
-  unsigned long currentTime = millis();
-  
-  // Debounce più aggressivo per encoder meccanici
-  if (currentTime - lastInterruptTime < ENCODER_INTERRUPT_DEBOUNCE) {
-    return;
-  }
-  
-  // Lettura stato attuale dei pin
-  bool currentCLK = digitalRead(ENCODER_CLK);
-  bool currentDT = digitalRead(ENCODER_DT);
-  
-  // Rilevamento fronte di salita su CLK (trigger principale)
-  if (currentCLK != lastCLK && currentCLK == HIGH) {
-    // Quadrature encoding: determina direzione basata su DT
-    if (currentDT == LOW) {
-      // Senso orario → incrementa
-      encoderPosition++;
-    } else {
-      // Senso antiorario → decrementa  
-      encoderPosition--;
-    }
-    
-    encoderChanged = true;
-    lastInterruptTime = currentTime;
-    
-    // Debug opzionale (rimuovi dopo test)
-    // Serial.printf("ENC: CLK=%d, DT=%d, Pos=%d\n", currentCLK, currentDT, encoderPosition);
-  }
-  
-  // Aggiorna stati precedenti
-  lastCLK = currentCLK;
-  lastDT = currentDT;
-}
-
 // ===== FUNZIONI DI SETUP =====
 void setupHardware() {
   Serial.println("⚙️ Inizializzazione hardware...");
@@ -200,10 +168,10 @@ void setupHardware() {
   Wire.setClock(400000); // 400kHz per I2C veloce
   Serial.printf("🔌 I2C inizializzato - SDA:%d, SCL:%d\n", I2C_SDA, I2C_SCL);
   
-  // Configurazione pin digitali
-  pinMode(ENCODER_CLK, INPUT);
-  pinMode(ENCODER_DT, INPUT);
-  pinMode(ENCODER_SW, INPUT);
+  // Configurazione pin digitali CON PULL-UP ESTERNE 4.7kΩ
+  pinMode(ENCODER_CLK, INPUT);     // NON più INPUT_PULLUP (pull-up esterne)
+  pinMode(ENCODER_DT, INPUT);      // NON più INPUT_PULLUP (pull-up esterne)
+  pinMode(ENCODER_SW, INPUT);      // NON più INPUT_PULLUP (pull-up esterne)
   pinMode(RELAY_HEATER, OUTPUT);
   pinMode(RELAY_COOLER, OUTPUT);
   pinMode(LED_STATUS, OUTPUT);
@@ -222,6 +190,7 @@ void setupHardware() {
   
   digitalWrite(LED_STATUS, LOW);
   Serial.println("✅ Pin configurati correttamente");
+  Serial.println("🔌 Pull-up esterne 4.7kΩ - interne disabilitate");
 }
 
 void setupLCD() {
@@ -244,7 +213,7 @@ void setupLCD() {
   lcd.setCursor(0, 0);
   lcd.print("ESP32 Thermostat");
   lcd.setCursor(0, 1);
-  lcd.print("Optoisolated v1.0");
+  lcd.print("Polling v2.0    ");
   delay(2000);
   
   Serial.println("✅ LCD I2C inizializzato");
@@ -263,12 +232,17 @@ void setupTemperatureSensor() {
 }
 
 void setupEncoder() {
-  Serial.println("🎛️ Configurazione encoder...");
+  Serial.println("🎛️ Configurazione encoder (POLLING MODE)...");
   
-  // Attivazione interrupt su fronte di salita del CLK
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), encoderRotationISR, RISING);
+  // NESSUN INTERRUPT - solo polling
+  // Inizializzazione stati encoder
+  lastCLKState = digitalRead(ENCODER_CLK);
+  lastDTState = digitalRead(ENCODER_DT);
   
-  Serial.println("✅ Interrupt encoder configurato");
+  Serial.println("✅ Encoder configurato in modalità POLLING");
+  Serial.printf("   └─ Polling interval: %dms (125Hz - alta velocità)\n", ENCODER_POLLING_INTERVAL);
+  Serial.println("   └─ Direzione: ORARIO = +, ANTIORARIO = -");
+  Serial.println("   └─ Pull-up esterne 4.7kΩ attive");
 }
 
 void setupEEPROM() {
@@ -493,15 +467,53 @@ void deactivateAllRelays() {
   }
 }
 
-// ===== GESTIONE ENCODER E MENU =====
+// ===== GESTIONE ENCODER POLLING VERSION =====
+void readEncoderPolling() {
+  unsigned long currentTime = millis();
+  
+  // Controllo timing polling - ogni 8ms = 125Hz (alta frequenza)
+  if (currentTime - lastEncoderPoll < ENCODER_POLLING_INTERVAL) {
+    return;
+  }
+  lastEncoderPoll = currentTime;
+  
+  // Lettura stato corrente pin encoder
+  bool currentCLK = digitalRead(ENCODER_CLK);
+  bool currentDT = digitalRead(ENCODER_DT);
+  
+  // Rileva cambiamento su CLK (pin principale di trigger)
+  if (currentCLK != lastCLKState) {
+    
+    // Fronte di discesa CLK = movimento encoder rilevato
+    if (currentCLK == LOW) {
+      // Determina direzione basata su stato DT al momento del trigger
+      if (currentDT == HIGH) {
+        // SENSO ORARIO → incrementa (+)
+        encoderPosition++;
+        encoderChanged = true;
+        Serial.printf("🎛️ Encoder: ORARIO (+) → pos=%d\n", encoderPosition);
+      } else {
+        // SENSO ANTIORARIO → decrementa (-)
+        encoderPosition--;
+        encoderChanged = true;
+        Serial.printf("🎛️ Encoder: ANTIORARIO (-) → pos=%d\n", encoderPosition);
+      }
+    }
+  }
+  
+  // Aggiorna stati precedenti per prossima iterazione
+  lastCLKState = currentCLK;
+  lastDTState = currentDT;
+}
+
 void handleEncoderInput() {
-  // Gestione rotazione encoder
+  // Gestione rotazione encoder (ora tramite polling)
   if (encoderChanged) {
     encoderChanged = false;
     processEncoderRotation();
   }
   
-  // Gestione pressione pulsante con debounce
+  // Gestione pressione pulsante con debounce software
   bool currentButtonState = digitalRead(ENCODER_SW);
   if (currentButtonState != lastButtonState) {
     lastDebounceTime = millis();
@@ -510,8 +522,9 @@ void handleEncoderInput() {
   if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
     if (currentButtonState != buttonPressed) {
       buttonPressed = currentButtonState;
-      if (buttonPressed == LOW) { // Pulsante premuto (active LOW)
+      if (buttonPressed == LOW) { // Pulsante premuto (active LOW con pull-up)
         processButtonPress();
+        Serial.println("🎛️ Pulsante encoder premuto");
       }
     }
   }
@@ -522,36 +535,51 @@ void processEncoderRotation() {
   int delta = encoderPosition - lastEncoderPosition;
   lastEncoderPosition = encoderPosition;
   
+  // Debug movimento encoder
+  if (delta != 0) {
+    Serial.printf("🎯 Delta: %s%d, Menu: %d\n", 
+                  delta > 0 ? "+" : "", delta, currentMenuState);
+  }
+  
   switch (currentMenuState) {
     case MAIN_DISPLAY:
       if (abs(delta) > 0) {
         currentMenuState = SETTINGS_MENU;
         menuSelectionIndex = 0;
+        Serial.println("📋 Entrato in menu settings");
       }
       break;
       
     case SETTINGS_MENU:
       menuSelectionIndex += delta;
       menuSelectionIndex = constrain(menuSelectionIndex, 0, 4);
+      Serial.printf("📋 Menu selection: %d\n", menuSelectionIndex);
       break;
       
     case TEMPERATURE_SETTING:
-      config.targetTemperature += delta * 0.5f;
+      config.targetTemperature += delta * 0.5f; // Incrementi di 0.5°C
       config.targetTemperature = constrain(config.targetTemperature, TEMP_MIN, TEMP_MAX);
+      Serial.printf("🎯 Target temp: %.1f°C\n", config.targetTemperature);
       break;
       
     case DELTA_SETTING:
-      config.deltaTemperature += delta * 0.1f;
+      config.deltaTemperature += delta * 0.1f; // Incrementi di 0.1°C
       config.deltaTemperature = constrain(config.deltaTemperature, DELTA_MIN, DELTA_MAX);
+      Serial.printf("📊 Delta temp: %.1f°C\n", config.deltaTemperature);
       break;
       
     case MODE_SETTING:
-      config.operatingMode = (config.operatingMode + delta) % 2;
-      if (config.operatingMode < 0) config.operatingMode = 1;
+      if (delta != 0) { // Qualsiasi movimento cambia modalità
+        config.operatingMode = (config.operatingMode == 0) ? 1 : 0;
+        Serial.printf("🔧 Mode: %s\n", config.operatingMode == 0 ? "HEATER" : "COOLER");
+      }
       break;
       
     case SYSTEM_STATE_SETTING:
-      config.systemEnabled = !config.systemEnabled;
+      if (delta != 0) { // Qualsiasi movimento toglia stato
+        config.systemEnabled = !config.systemEnabled;
+        Serial.printf("⚡ System: %s\n", config.systemEnabled ? "ON" : "OFF");
+      }
       break;
   }
 }
@@ -561,17 +589,31 @@ void processButtonPress() {
     case MAIN_DISPLAY:
       currentMenuState = SETTINGS_MENU;
       menuSelectionIndex = 0;
+      Serial.println("📋 Entrato in settings dal main");
       break;
       
     case SETTINGS_MENU:
       switch (menuSelectionIndex) {
-        case 0: currentMenuState = TEMPERATURE_SETTING; break;
-        case 1: currentMenuState = DELTA_SETTING; break;
-        case 2: currentMenuState = MODE_SETTING; break;
-        case 3: currentMenuState = SYSTEM_STATE_SETTING; break;
+        case 0: 
+          currentMenuState = TEMPERATURE_SETTING; 
+          Serial.println("🎯 Impostazione temperatura");
+          break;
+        case 1: 
+          currentMenuState = DELTA_SETTING; 
+          Serial.println("📊 Impostazione delta");
+          break;
+        case 2: 
+          currentMenuState = MODE_SETTING; 
+          Serial.println("🔧 Impostazione modalità");
+          break;
+        case 3: 
+          currentMenuState = SYSTEM_STATE_SETTING; 
+          Serial.println("⚡ Impostazione sistema");
+          break;
         case 4: 
           currentMenuState = MAIN_DISPLAY;
           saveConfiguration();
+          Serial.println("💾 Configurazione salvata, ritorno al main");
           break;
       }
       break;
@@ -579,6 +621,7 @@ void processButtonPress() {
     default:
       currentMenuState = SETTINGS_MENU;
       saveConfiguration();
+      Serial.println("💾 Configurazione salvata, ritorno al menu");
       break;
   }
 }
@@ -680,7 +723,7 @@ void setup() {
   // Inizializzazione comunicazione seriale
   Serial.begin(115200);
   Serial.println("\n🚀 ===== TERMOSTATO INTELLIGENTE ESP32 =====");
-  Serial.println("📅 PlatformIO + Relay Optoisolati GTZ817C");
+  Serial.println("📅 PlatformIO + Encoder POLLING + Pull-up 4.7kΩ");
   Serial.printf("🔧 ESP32 Core Version: %s\n", ESP.getSdkVersion());
   
   // Informazioni board e chip
@@ -710,6 +753,14 @@ void setup() {
     Serial.println("   └─ HIGH = Relay ON, LOW = Relay OFF");
   }
   
+  // Informazioni encoder
+  Serial.println("🎛️ Configurazione encoder: POLLING MODE OTTIMIZZATO");
+  Serial.printf("   └─ Frequenza polling: %dms (%dHz)\n", 
+                ENCODER_POLLING_INTERVAL, 1000/ENCODER_POLLING_INTERVAL);
+  Serial.println("   └─ Direzione: ORARIO (+), ANTIORARIO (-)");
+  Serial.println("   └─ Pull-up esterne 4.7kΩ, interne disabilitate");
+  Serial.println("   └─ Ottimizzato per alta velocità di rotazione");
+  
   // Inizializzazione componenti hardware
   setupEEPROM();
   setupHardware();
@@ -731,14 +782,20 @@ void setup() {
   displayMainScreen();
   
   Serial.println("✅ Sistema inizializzato e operativo!");
-  Serial.println("📱 Menu: Ruota encoder o premi per navigare");
+  Serial.println("📱 Menu: Ruota encoder (POLLING) o premi per navigare");
   Serial.println("🔒 Sicurezza relay optoisolati attiva");
+  Serial.println("🎛️ Encoder polling attivo - stabilità garantita ad alta velocità");
+  Serial.println("🔄 Direzione encoder: ORARIO = +, ANTIORARIO = -");
 }
 
 void loop() {
   unsigned long currentTime = millis();
   
-  // Gestione input encoder
+  // ⚡ POLLING ENCODER - PRIORITÀ MASSIMA
+  // Chiamata ogni ciclo per garantire responsività anche ad alta velocità
+  readEncoderPolling();
+  
+  // Gestione input encoder e pulsante
   handleEncoderInput();
   
   // Lettura temperatura ogni TEMP_READ_INTERVAL ms
@@ -759,6 +816,6 @@ void loop() {
   // LED di stato sistema
   digitalWrite(LED_STATUS, config.systemEnabled && !temperatureSensorError);
   
-  // Piccolo delay per stabilità del loop
-  delay(10);
+  // Delay ridotto per garantire polling veloce (8ms interno + 2ms loop = 10ms totali)
+  delay(2);
 }
