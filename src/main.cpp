@@ -6,26 +6,25 @@
 #include <Wire.h>
 
 /*
- * TERMOSTATO INTELLIGENTE ESP32 - LCD 4x20 INTERFACE
+ * TERMOSTATO INTELLIGENTE ESP32 - LCD 4x20 + BACKLIGHT AUTOMATICO
  * Framework: Arduino per ESP32
  * Platform: Espressif32
  * 
- * VERSIONE CON LCD 4x20 - INTERFACCIA PROFESSIONALE
+ * VERSIONE COMPLETA CON:
+ * - LCD 4x20 interfaccia professionale
  * - Encoder polling per alta velocità
  * - Pull-up esterne 4.7kΩ per stabilità massima
- * - Display 4x20 con informazioni complete
- * - Menu avanzato con preview valori
- * - Grafici ASCII e barre progresso
- * - Schermata diagnostica integrata
+ * - Sistema backlight automatico intelligente
+ * - Gestione avanzata energia e UX
  * 
  * COMPONENTI HARDWARE:
  * - ESP32-WROOM-32 (DevKit)
- * - LCD I2C 4x20 (PCF8574 backpack)
+ * - LCD I2C 4x20 (PCF8574 backpack) con gestione backlight
  * - Encoder rotativo KY-040 + resistenze pull-up 4.7kΩ
  * - Modulo relay 2 canali OPTOISOLATI (GTZ817C)
  * - Sensore DS18B20 OneWire
  * 
- * FEATURES:
+ * FEATURES AVANZATE:
  * - Controllo temperatura con isteresi configurabile
  * - Menu navigabile con encoder rotativo (POLLING - alta velocità)
  * - Salvataggio configurazione in EEPROM
@@ -33,6 +32,9 @@
  * - Interfaccia 4x20 ultra-informativa
  * - Diagnostica hardware integrata
  * - Caratteri personalizzati e grafici ASCII
+ * - BACKLIGHT AUTOMATICO con spegnimento 30s inattività
+ * - Tracking attività utente intelligente
+ * - Modalità risparmio energetico avanzato
  */
 
 // ===== FORWARD DECLARATIONS per PlatformIO =====
@@ -71,6 +73,15 @@ void displayModeSetting();
 void displaySystemStateSetting();
 void displayDiagnosticScreen();
 
+// Backlight management - SISTEMA AUTOMATICO
+void updateBacklightManagement();
+void setBacklight(bool state, bool immediate = true);
+void resetUserActivityTimer();
+bool isUserActive();
+void toggleBacklightMode();
+void forceBacklightOn();
+void getBacklightStatus();
+
 // Helper functions
 const char* getMenuValue(int index);
 void createProgressBar(char* buffer, float value, float min, float max, int length);
@@ -105,6 +116,10 @@ void createTemperatureGraph(char* buffer, float current, float target, float del
 #define DEBOUNCE_DELAY        50      // ms - debounce pulsante encoder
 #define ENCODER_POLLING_INTERVAL 8    // ms - polling encoder ottimizzato (125Hz)
 
+// CONFIGURAZIONI BACKLIGHT AUTOMATICO
+#define BACKLIGHT_TIMEOUT     30000   // ms - 30 secondi timeout backlight
+#define BACKLIGHT_FADE_STEPS  10      // Steps per fade out smooth (futuro)
+
 #define TEMP_MIN             -50.0f   // °C - temperatura minima configurabile
 #define TEMP_MAX             150.0f   // °C - temperatura massima configurabile
 #define DELTA_MIN            0.5f     // °C - delta minimo configurabile
@@ -116,7 +131,7 @@ void createTemperatureGraph(char* buffer, float current, float target, float del
 // ===== CONFIGURAZIONE RELAY OPTOISOLATI =====
 // GTZ817C Optoaccoppiatori: logica invertita
 // HIGH = Relay OFF, LOW = Relay ON
-#define RELAY_LOGIC_INVERTED  true
+#define RELAY_LOGIC_INVERTED  false
 
 // ===== CARATTERI PERSONALIZZATI =====
 #define CHAR_THERMOMETER 0
@@ -164,6 +179,12 @@ bool lastCLKState = HIGH;
 bool lastDTState = HIGH;
 unsigned long lastEncoderPoll = 0;
 
+// VARIABILI GESTIONE BACKLIGHT AUTOMATICO
+unsigned long lastUserActivity = 0;    // Timestamp ultima attività utente
+bool backlightActive = true;           // Stato attuale backlight
+bool backlightAutoMode = true;         // Modalità automatica attiva
+unsigned long backlightFadeStart = 0;  // Per fade graduale (futuro)
+
 // Sistema menu multi-livello esteso
 enum MenuState {
   MAIN_DISPLAY,
@@ -184,6 +205,115 @@ float temperatureHistory[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 int historyIndex = 0;
 unsigned long totalOnTime = 0;
 unsigned long lastRelayChange = 0;
+
+// ===== FUNZIONI GESTIONE BACKLIGHT AUTOMATICO =====
+void updateBacklightManagement() {
+  if (!backlightAutoMode) {
+    return; // Modalità automatica disabilitata
+  }
+  
+  unsigned long currentTime = millis();
+  unsigned long inactiveTime = currentTime - lastUserActivity;
+  
+  // Check se è tempo di spegnere backlight
+  if (backlightActive && inactiveTime >= BACKLIGHT_TIMEOUT) {
+    setBacklight(false);
+    Serial.println("💡 Backlight spenta per inattività");
+  }
+  
+  // Check se riattivare backlight per attività recente
+  if (!backlightActive && inactiveTime < BACKLIGHT_TIMEOUT) {
+    setBacklight(true);
+    Serial.println("💡 Backlight riattivata per attività utente");
+  }
+}
+
+void setBacklight(bool state, bool immediate) {
+  if (backlightActive == state) {
+    return; // Già nello stato richiesto
+  }
+  
+  backlightActive = state;
+  
+  if (immediate) {
+    // Cambio immediato
+    if (state) {
+      lcd.backlight();
+      Serial.println("💡 Backlight ON");
+    } else {
+      lcd.noBacklight();
+      Serial.println("💡 Backlight OFF");
+    }
+  } else {
+    // TODO: Implementazione fade graduale (futuro)
+    // Per ora usa cambio immediato
+    if (state) {
+      lcd.backlight();
+    } else {
+      lcd.noBacklight();
+    }
+  }
+}
+
+void resetUserActivityTimer() {
+  unsigned long currentTime = millis();
+  
+  // Se backlight era spenta, riaccendila immediatamente
+  if (!backlightActive && backlightAutoMode) {
+    setBacklight(true);
+    Serial.println("💡 Backlight riattivata da interazione utente");
+  }
+  
+  lastUserActivity = currentTime;
+  
+  // Debug: stampa solo se backlight era spenta (evita spam)
+  static bool wasInactive = false;
+  if (!backlightActive || wasInactive) {
+    Serial.printf("👆 Attività utente rilevata (tempo: %lu)\n", currentTime);
+    wasInactive = false;
+  }
+  
+  if (currentTime - lastUserActivity > BACKLIGHT_TIMEOUT - 5000) { // 5 sec prima
+    wasInactive = true;
+  }
+}
+
+bool isUserActive() {
+  return (millis() - lastUserActivity) < BACKLIGHT_TIMEOUT;
+}
+
+void toggleBacklightMode() {
+  backlightAutoMode = !backlightAutoMode;
+  
+  if (backlightAutoMode) {
+    Serial.println("💡 Modalità backlight: AUTOMATICA");
+    lastUserActivity = millis(); // Reset timer
+  } else {
+    Serial.println("💡 Modalità backlight: MANUALE");
+    setBacklight(true); // Accendi in modalità manuale
+  }
+}
+
+void forceBacklightOn() {
+  backlightAutoMode = false;
+  setBacklight(true);
+  Serial.println("💡 Backlight forzata SEMPRE ACCESA");
+}
+
+void getBacklightStatus() {
+  Serial.println("💡 ===== STATUS BACKLIGHT =====");
+  Serial.printf("Stato attuale: %s\n", backlightActive ? "ACCESA" : "SPENTA");
+  Serial.printf("Modalità: %s\n", backlightAutoMode ? "AUTOMATICA" : "MANUALE");
+  
+  if (backlightAutoMode) {
+    unsigned long inactiveTime = millis() - lastUserActivity;
+    unsigned long remainingTime = (BACKLIGHT_TIMEOUT > inactiveTime) ? 
+                                  (BACKLIGHT_TIMEOUT - inactiveTime) : 0;
+    Serial.printf("Ultima attività: %lu ms fa\n", inactiveTime);
+    Serial.printf("Tempo rimanente: %lu ms\n", remainingTime);
+  }
+  Serial.println("==============================");
+}
 
 // ===== FUNZIONI DI SETUP =====
 void setupHardware() {
@@ -244,9 +374,9 @@ void setupLCD() {
   lcd.setCursor(0, 1);
   lcd.print("  Advanced Interface ");
   lcd.setCursor(0, 2);
-  lcd.print("   4x20 LCD + Poll   ");
+  lcd.print("  4x20 + Auto BLight ");
   lcd.setCursor(0, 3);
-  lcd.print("      v3.0           ");
+  lcd.print("      v4.0           ");
   delay(3000);
   
   Serial.println("✅ LCD I2C 4x20 inizializzato");
@@ -566,7 +696,7 @@ void deactivateAllRelays() {
   }
 }
 
-// ===== GESTIONE ENCODER POLLING VERSION =====
+// ===== GESTIONE ENCODER POLLING VERSION CON BACKLIGHT =====
 void readEncoderPolling() {
   unsigned long currentTime = millis();
   
@@ -585,6 +715,9 @@ void readEncoderPolling() {
     
     // Fronte di discesa CLK = movimento encoder rilevato
     if (currentCLK == LOW) {
+      // ✅ RESET TIMER ATTIVITÀ UTENTE
+      resetUserActivityTimer();
+      
       // Determina direzione basata su stato DT al momento del trigger
       if (currentDT == HIGH) {
         // SENSO ORARIO → incrementa (+)
@@ -622,6 +755,9 @@ void handleEncoderInput() {
     if (currentButtonState != buttonPressed) {
       buttonPressed = currentButtonState;
       if (buttonPressed == LOW) { // Pulsante premuto (active LOW con pull-up)
+        // ✅ RESET TIMER ATTIVITÀ UTENTE
+        resetUserActivityTimer();
+        
         processButtonPress();
         Serial.println("🎛️ Pulsante encoder premuto");
       }
@@ -801,7 +937,7 @@ void createTemperatureGraph(char* buffer, float current, float target, float del
   buffer[6] = '\0';
 }
 
-// ===== GESTIONE DISPLAY 4x20 =====
+// ===== GESTIONE DISPLAY 4x20 CON BACKLIGHT AUTOMATICO =====
 void updateDisplayContent() {
   switch (currentMenuState) {
     case MAIN_DISPLAY:
@@ -1058,28 +1194,28 @@ void displayDiagnosticScreen() {
   lcd.setCursor(0, 0);
   lcd.print("===== DIAGNOSTIC ===");
   
-  // RIGA 2: Info hardware
+  // RIGA 2: Info hardware + backlight status
   lcd.setCursor(0, 1);
   char hwStr[21];
-  snprintf(hwStr, 21, "CPU:%dMHz RAM:%dKB", ESP.getCpuFreqMHz(), ESP.getFreeHeap()/1024);
+  snprintf(hwStr, 21, "CPU:%dMHz BL:%s", ESP.getCpuFreqMHz(), 
+           backlightActive ? "ON " : "OFF");
   lcd.print(hwStr);
   
-  // RIGA 3: Uptime e contatori
+  // RIGA 3: Uptime e contatori + timer backlight
   lcd.setCursor(0, 2);
   char uptimeStr[21];
   unsigned long uptime = millis() / 1000;
-  snprintf(uptimeStr, 21, "UP:%02d:%02d:%02d ENC:%d", 
-           (int)(uptime/3600), (int)((uptime%3600)/60), (int)(uptime%60),
-           abs(encoderPosition) % 1000);
+  unsigned long inactive = (millis() - lastUserActivity) / 1000;
+  snprintf(uptimeStr, 21, "UP:%02d:%02d IDLE:%02ds", 
+           (int)(uptime/60), (int)(uptime%60), (int)inactive);
   lcd.print(uptimeStr);
   
-  // RIGA 4: Status I2C e sensori
+  // RIGA 4: Status I2C e sensori + modalità backlight
   lcd.setCursor(0, 3);
   char sensorStr[21];
-  snprintf(sensorStr, 21, "I2C:OK DS18:%s R:H%sC%s", 
+  snprintf(sensorStr, 21, "I2C:OK DS:%s BL:%s", 
            temperatureSensorError ? "ERR" : "OK ",
-           heaterRelayActive ? "+" : "-",
-           coolerRelayActive ? "+" : "-");
+           backlightAutoMode ? "AUTO" : "MAN ");
   lcd.print(sensorStr);
 }
 
@@ -1091,7 +1227,7 @@ void setup() {
   // Inizializzazione comunicazione seriale
   Serial.begin(115200);
   Serial.println("\n🚀 ===== TERMOSTATO INTELLIGENTE ESP32 =====");
-  Serial.println("📅 PlatformIO + LCD 4x20 + Encoder POLLING + Pull-up 4.7kΩ");
+  Serial.println("📅 PlatformIO + LCD 4x20 + Backlight Auto + Encoder POLLING");
   Serial.printf("🔧 ESP32 Core Version: %s\n", ESP.getSdkVersion());
   
   // Informazioni board e chip
@@ -1150,6 +1286,16 @@ void setup() {
   // Caricamento configurazione
   loadConfiguration();
   
+  // ✅ INIZIALIZZA SISTEMA BACKLIGHT AUTOMATICO
+  lastUserActivity = millis();
+  backlightActive = true;
+  backlightAutoMode = true;
+  
+  Serial.println("💡 Sistema backlight automatico attivato");
+  Serial.printf("   └─ Timeout: %d secondi\n", BACKLIGHT_TIMEOUT / 1000);
+  Serial.println("   └─ Riattivazione automatica su input utente");
+  Serial.println("   └─ Modalità: AUTOMATICA (energia-efficiente)");
+  
   // Prima lettura temperatura
   updateTemperatureReading();
   
@@ -1162,6 +1308,7 @@ void setup() {
   Serial.println("🎛️ Encoder polling attivo - stabilità garantita ad alta velocità");
   Serial.println("🔄 Direzione encoder: ORARIO = +, ANTIORARIO = -");
   Serial.println("🖥️ Interfaccia LCD 4x20 professionale attiva");
+  Serial.println("💡 Backlight automatico: spegnimento 30s, riattivazione immediata");
 }
 
 void loop() {
@@ -1183,6 +1330,9 @@ void loop() {
   // Controllo logica termostato con relay optoisolati
   controlThermostatLogic();
   
+  // ✅ GESTIONE BACKLIGHT AUTOMATICA (NUOVA FUNZIONALITÀ)
+  updateBacklightManagement();
+  
   // Aggiornamento display ogni DISPLAY_UPDATE_INTERVAL ms
   if (currentTime - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
     updateDisplayContent();
@@ -1192,6 +1342,6 @@ void loop() {
   // LED di stato sistema
   digitalWrite(LED_STATUS, config.systemEnabled && !temperatureSensorError);
   
-  // Delay ridotto per garantire polling veloce (8ms interno + 2ms loop = 10ms totali)
+  // Delay ridotto per garantire polling veloce + backlight responsivo
   delay(2);
 }
