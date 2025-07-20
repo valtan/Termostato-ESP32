@@ -6,16 +6,21 @@
 #include <Wire.h>
 
 /*
- * TERMOSTATO INTELLIGENTE ESP32 - PlatformIO + Relay Optoisolati
+ * TERMOSTATO INTELLIGENTE ESP32 - LCD 4x20 INTERFACE
  * Framework: Arduino per ESP32
  * Platform: Espressif32
  * 
- * VERSIONE CON ENCODER POLLING (risolve problemi alta velocità)
- * Pull-up esterne 4.7kΩ per stabilità massima
+ * VERSIONE CON LCD 4x20 - INTERFACCIA PROFESSIONALE
+ * - Encoder polling per alta velocità
+ * - Pull-up esterne 4.7kΩ per stabilità massima
+ * - Display 4x20 con informazioni complete
+ * - Menu avanzato con preview valori
+ * - Grafici ASCII e barre progresso
+ * - Schermata diagnostica integrata
  * 
  * COMPONENTI HARDWARE:
  * - ESP32-WROOM-32 (DevKit)
- * - LCD I2C 16x2 (PCF8574 backpack)
+ * - LCD I2C 4x20 (PCF8574 backpack)
  * - Encoder rotativo KY-040 + resistenze pull-up 4.7kΩ
  * - Modulo relay 2 canali OPTOISOLATI (GTZ817C)
  * - Sensore DS18B20 OneWire
@@ -25,9 +30,9 @@
  * - Menu navigabile con encoder rotativo (POLLING - alta velocità)
  * - Salvataggio configurazione in EEPROM
  * - Sistema di sicurezza relay optoisolati
- * - Monitoraggio I2C automatico
- * - Logica invertita per optoaccoppiatori GTZ817C
- * - Direzione corretta: ORARIO = +, ANTIORARIO = -
+ * - Interfaccia 4x20 ultra-informativa
+ * - Diagnostica hardware integrata
+ * - Caratteri personalizzati e grafici ASCII
  */
 
 // ===== FORWARD DECLARATIONS per PlatformIO =====
@@ -38,6 +43,7 @@ void setupTemperatureSensor();
 void setupEncoder();
 void setupEEPROM();
 void scanI2CDevices();
+void createCustomChars();
 
 // Configuration management
 void loadConfiguration();
@@ -55,7 +61,7 @@ void handleEncoderInput();
 void processEncoderRotation();
 void processButtonPress();
 
-// Display management
+// Display management - 4x20 VERSION
 void updateDisplayContent();
 void displayMainScreen();
 void displaySettingsMenu();
@@ -63,6 +69,12 @@ void displayTemperatureSetting();
 void displayDeltaSetting();
 void displayModeSetting();
 void displaySystemStateSetting();
+void displayDiagnosticScreen();
+
+// Helper functions
+const char* getMenuValue(int index);
+void createProgressBar(char* buffer, float value, float min, float max, int length);
+void createTemperatureGraph(char* buffer, float current, float target, float delta);
 
 // ===== CONFIGURAZIONI HARDWARE =====
 // I2C Bus (condiviso LCD + eventuali expander)
@@ -93,8 +105,8 @@ void displaySystemStateSetting();
 #define DEBOUNCE_DELAY        50      // ms - debounce pulsante encoder
 #define ENCODER_POLLING_INTERVAL 8    // ms - polling encoder ottimizzato (125Hz)
 
-#define TEMP_MIN             -50.0f    // °C - temperatura minima configurabile
-#define TEMP_MAX             150.0f    // °C - temperatura massima configurabile
+#define TEMP_MIN             -50.0f   // °C - temperatura minima configurabile
+#define TEMP_MAX             150.0f   // °C - temperatura massima configurabile
 #define DELTA_MIN            0.5f     // °C - delta minimo configurabile
 #define DELTA_MAX            5.0f     // °C - delta massimo configurabile
 
@@ -106,14 +118,20 @@ void displaySystemStateSetting();
 // HIGH = Relay OFF, LOW = Relay ON
 #define RELAY_LOGIC_INVERTED  true
 
+// ===== CARATTERI PERSONALIZZATI =====
+#define CHAR_THERMOMETER 0
+#define CHAR_ARROW_UP    1
+#define CHAR_ARROW_DOWN  2
+#define CHAR_DEGREE      3
+
 // ===== INIZIALIZZAZIONE OGGETTI =====
-LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, 16, 2);
+LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, 20, 4);  // LCD 4x20 invece di 16x2
 OneWire oneWire(TEMP_SENSOR_PIN);
 DallasTemperature temperatureSensor(&oneWire);
 
 // ===== STRUTTURE DATI =====
 struct ThermostatConfig {
-  float targetTemperature;    // Temperatura obiettivo (10.0 - 35.0°C)
+  float targetTemperature;    // Temperatura obiettivo (-50.0 - 150.0°C)
   float deltaTemperature;     // Isteresi temperatura (0.5 - 5.0°C)
   bool systemEnabled;         // Sistema attivo/disattivo
   uint8_t operatingMode;      // 0=HEATER, 1=COOLER
@@ -131,6 +149,7 @@ bool coolerRelayActive = false;
 bool temperatureSensorError = false;
 unsigned long lastTemperatureRead = 0;
 unsigned long lastDisplayUpdate = 0;
+unsigned long systemStartTime = 0;
 
 // Variabili encoder POLLING VERSION (NON più volatile)
 int encoderPosition = 0;
@@ -145,19 +164,26 @@ bool lastCLKState = HIGH;
 bool lastDTState = HIGH;
 unsigned long lastEncoderPoll = 0;
 
-// Sistema menu multi-livello
+// Sistema menu multi-livello esteso
 enum MenuState {
   MAIN_DISPLAY,
   SETTINGS_MENU,
   TEMPERATURE_SETTING,
   DELTA_SETTING,
   MODE_SETTING,
-  SYSTEM_STATE_SETTING
+  SYSTEM_STATE_SETTING,
+  DIAGNOSTIC_SCREEN
 };
 
 MenuState currentMenuState = MAIN_DISPLAY;
 int menuSelectionIndex = 0;
 bool inSubMenu = false;
+
+// Statistiche sistema
+float temperatureHistory[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+int historyIndex = 0;
+unsigned long totalOnTime = 0;
+unsigned long lastRelayChange = 0;
 
 // ===== FUNZIONI DI SETUP =====
 void setupHardware() {
@@ -194,9 +220,9 @@ void setupHardware() {
 }
 
 void setupLCD() {
-  Serial.println("🖥️ Inizializzazione LCD I2C...");
+  Serial.println("🖥️ Inizializzazione LCD I2C 4x20...");
   
-  // Inizializzazione LCD I2C
+  // Inizializzazione LCD I2C 4x20
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -204,19 +230,81 @@ void setupLCD() {
   // Verifica comunicazione I2C
   Wire.beginTransmission(LCD_I2C_ADDRESS);
   if (Wire.endTransmission() == 0) {
-    Serial.printf("✅ LCD I2C trovato all'indirizzo 0x%02X\n", LCD_I2C_ADDRESS);
+    Serial.printf("✅ LCD I2C 4x20 trovato all'indirizzo 0x%02X\n", LCD_I2C_ADDRESS);
   } else {
     Serial.printf("❌ ERRORE: LCD I2C non trovato all'indirizzo 0x%02X\n", LCD_I2C_ADDRESS);
   }
   
-  // Messaggio di benvenuto
-  lcd.setCursor(0, 0);
-  lcd.print("ESP32 Thermostat");
-  lcd.setCursor(0, 1);
-  lcd.print("Polling v2.0    ");
-  delay(2000);
+  // Crea caratteri personalizzati
+  createCustomChars();
   
-  Serial.println("✅ LCD I2C inizializzato");
+  // Messaggio di benvenuto 4x20
+  lcd.setCursor(0, 0);
+  lcd.print("   ESP32 THERMOSTAT  ");
+  lcd.setCursor(0, 1);
+  lcd.print("  Advanced Interface ");
+  lcd.setCursor(0, 2);
+  lcd.print("   4x20 LCD + Poll   ");
+  lcd.setCursor(0, 3);
+  lcd.print("      v3.0           ");
+  delay(3000);
+  
+  Serial.println("✅ LCD I2C 4x20 inizializzato");
+}
+
+void createCustomChars() {
+  // Carattere termometro
+  byte thermometer[8] = {
+    B00100,
+    B01010,
+    B01010,
+    B01110,
+    B11111,
+    B11111,
+    B01110,
+    B00000
+  };
+  
+  // Carattere freccia su
+  byte arrowUp[8] = {
+    B00100,
+    B01110,
+    B11111,
+    B00100,
+    B00100,
+    B00100,
+    B00100,
+    B00000
+  };
+  
+  // Carattere freccia giù
+  byte arrowDown[8] = {
+    B00100,
+    B00100,
+    B00100,
+    B00100,
+    B11111,
+    B01110,
+    B00100,
+    B00000
+  };
+  
+  // Carattere grado personalizzato
+  byte degree[8] = {
+    B01100,
+    B10010,
+    B10010,
+    B01100,
+    B00000,
+    B00000,
+    B00000,
+    B00000
+  };
+  
+  lcd.createChar(CHAR_THERMOMETER, thermometer);
+  lcd.createChar(CHAR_ARROW_UP, arrowUp);
+  lcd.createChar(CHAR_ARROW_DOWN, arrowDown);
+  lcd.createChar(CHAR_DEGREE, degree);
 }
 
 void setupTemperatureSensor() {
@@ -271,7 +359,7 @@ void scanI2CDevices() {
       switch (address) {
         case 0x27:
         case 0x3F:
-          Serial.println("   └─ Probabile LCD I2C");
+          Serial.println("   └─ Probabile LCD I2C 4x20");
           break;
         case 0x20:
         case 0x21:
@@ -377,6 +465,11 @@ void updateTemperatureReading() {
       Serial.println("✅ Sensore temperatura ripristinato");
       temperatureSensorError = false;
     }
+    
+    // Aggiorna storico temperature
+    temperatureHistory[historyIndex] = currentTemperature;
+    historyIndex = (historyIndex + 1) % 4;
+    
     currentTemperature = temperature;
     Serial.printf("🌡️ Temperatura: %.2f°C\n", currentTemperature);
   }
@@ -425,13 +518,19 @@ void controlThermostatLogic() {
 
 void updateRelayState(int relayPin, bool shouldActivate, bool &currentState, const char* relayName) {
   if (shouldActivate != currentState) {
+    // Statistiche tempo attivazione
+    if (currentState && !shouldActivate) {
+      totalOnTime += millis() - lastRelayChange;
+    }
+    if (!currentState && shouldActivate) {
+      lastRelayChange = millis();
+    }
+    
     currentState = shouldActivate;
     
     // Logica per relay optoisolati GTZ817C
     if (RELAY_LOGIC_INVERTED) {
       // Logica invertita: LOW = Relay ON, HIGH = Relay OFF
-      // shouldActivate=true  → pin=LOW  → optoaccoppiatore ON  → relay ON
-      // shouldActivate=false → pin=HIGH → optoaccoppiatore OFF → relay OFF
       digitalWrite(relayPin, currentState ? LOW : HIGH);
       Serial.printf("🔌 %s: %s (pin=%s - GTZ817C)\n", 
                     relayName, 
@@ -552,7 +651,7 @@ void processEncoderRotation() {
       
     case SETTINGS_MENU:
       menuSelectionIndex += delta;
-      menuSelectionIndex = constrain(menuSelectionIndex, 0, 4);
+      menuSelectionIndex = constrain(menuSelectionIndex, 0, 5); // Aggiunto diagnostica
       Serial.printf("📋 Menu selection: %d\n", menuSelectionIndex);
       break;
       
@@ -579,6 +678,14 @@ void processEncoderRotation() {
       if (delta != 0) { // Qualsiasi movimento toglia stato
         config.systemEnabled = !config.systemEnabled;
         Serial.printf("⚡ System: %s\n", config.systemEnabled ? "ON" : "OFF");
+      }
+      break;
+      
+    case DIAGNOSTIC_SCREEN:
+      // Scroll tra diverse info diagnostiche
+      if (abs(delta) > 0) {
+        currentMenuState = MAIN_DISPLAY;
+        Serial.println("📋 Ritorno al main da diagnostica");
       }
       break;
   }
@@ -611,6 +718,10 @@ void processButtonPress() {
           Serial.println("⚡ Impostazione sistema");
           break;
         case 4: 
+          currentMenuState = DIAGNOSTIC_SCREEN;
+          Serial.println("🔍 Aperta diagnostica");
+          break;
+        case 5: 
           currentMenuState = MAIN_DISPLAY;
           saveConfiguration();
           Serial.println("💾 Configurazione salvata, ritorno al main");
@@ -626,7 +737,71 @@ void processButtonPress() {
   }
 }
 
-// ===== GESTIONE DISPLAY =====
+// ===== FUNZIONI HELPER PER DISPLAY =====
+const char* getMenuValue(int index) {
+  static char valueStr[9];
+  switch (index) {
+    case 0: // Temperature
+      snprintf(valueStr, 9, "%6.1f°C", config.targetTemperature);
+      break;
+    case 1: // Delta
+      snprintf(valueStr, 9, "±%.1f°C", config.deltaTemperature);
+      break;
+    case 2: // Mode
+      strcpy(valueStr, config.operatingMode == 0 ? "HEAT " : "COOL ");
+      break;
+    case 3: // System
+      strcpy(valueStr, config.systemEnabled ? "ON  " : "OFF ");
+      break;
+    case 4: // Diagnostic
+      strcpy(valueStr, "INFO ");
+      break;
+    case 5: // Save
+      strcpy(valueStr, "EXIT ");
+      break;
+    default:
+      strcpy(valueStr, "     ");
+  }
+  return valueStr;
+}
+
+void createProgressBar(char* buffer, float value, float minVal, float maxVal, int length) {
+  float normalized = (value - minVal) / (maxVal - minVal);
+  normalized = constrain(normalized, 0.0f, 1.0f);
+  int barLength = (int)(normalized * length);
+  
+  for (int i = 0; i < length; i++) {
+    if (i < barLength) {
+      buffer[i] = (char)255; // Carattere pieno
+    } else {
+      buffer[i] = (char)45;  // Carattere vuoto (-)
+    }
+  }
+  buffer[length] = '\0';
+}
+
+void createTemperatureGraph(char* buffer, float current, float target, float delta) {
+  // Crea mini-grafico 6 caratteri: target-delta, target, target+delta
+  float range = delta * 4; // Range totale del grafico
+  float min = target - range/2;
+  float max = target + range/2;
+  
+  int pos = (int)((current - min) / (max - min) * 5);
+  pos = constrain(pos, 0, 5);
+  
+  for (int i = 0; i < 6; i++) {
+    if (i == pos) {
+      buffer[i] = (char)CHAR_THERMOMETER; // Posizione temperatura attuale
+    } else if (i == 2 || i == 3) {
+      buffer[i] = '|'; // Target zone
+    } else {
+      buffer[i] = '-';
+    }
+  }
+  buffer[6] = '\0';
+}
+
+// ===== GESTIONE DISPLAY 4x20 =====
 void updateDisplayContent() {
   switch (currentMenuState) {
     case MAIN_DISPLAY:
@@ -647,83 +822,276 @@ void updateDisplayContent() {
     case SYSTEM_STATE_SETTING:
       displaySystemStateSetting();
       break;
+    case DIAGNOSTIC_SCREEN:
+      displayDiagnosticScreen();
+      break;
   }
 }
 
 void displayMainScreen() {
   lcd.clear();
   
-  // Prima riga: temperatura attuale e stato sensore
+  // RIGA 1: Temperatura attuale e status
   lcd.setCursor(0, 0);
   if (temperatureSensorError) {
-    lcd.print("TEMP: ERROR!    ");
+    lcd.print("TEMP: ERROR!        ");
   } else {
-    lcd.printf("TEMP: %5.1f%cC   ", currentTemperature, (char)223);
+    char tempStr[21];
+    const char* status = (abs(currentTemperature - config.targetTemperature) <= config.deltaTemperature) ? "OK" : "!!";
+    snprintf(tempStr, 21, "TEMP:%7.2f%cC [%s]", currentTemperature, (char)223, status);
+    lcd.print(tempStr);
   }
   
-  // Seconda riga: stato sistema e relay
+  // RIGA 2: Target e isteresi con carattere grado personalizzato
   lcd.setCursor(0, 1);
-  lcd.print(config.systemEnabled ? "ON " : "OFF");
-  lcd.print(config.operatingMode == 0 ? " H:" : " C:");
-  lcd.print(heaterRelayActive ? "ON " : "OFF");
-  lcd.print(coolerRelayActive ? "ON " : "OFF");
-  lcd.printf(" %4.1f%c", config.targetTemperature, (char)223);
+  char targetStr[21];
+  snprintf(targetStr, 21, "TARGET:%6.1f%cC %c%.1f%cC", 
+           config.targetTemperature, (char)223, (char)177, 
+           config.deltaTemperature, (char)223);
+  lcd.print(targetStr);
+  
+  // RIGA 3: Sistema, modalità e uptime
+  lcd.setCursor(0, 2);
+  char systemStr[21];
+  unsigned long uptime = (millis() - systemStartTime) / 1000;
+  snprintf(systemStr, 21, "SYS:%s MODE:%s T:%02d:%02d", 
+           config.systemEnabled ? "ON " : "OFF",
+           config.operatingMode == 0 ? "HEAT" : "COOL",
+           (int)(uptime / 60), (int)(uptime % 60));
+  lcd.print(systemStr);
+  
+  // RIGA 4: Relay status + menu hint + grafico temperatura
+  lcd.setCursor(0, 3);
+  char relayStr[21];
+  
+  // Crea mini-grafico temperatura (6 caratteri)
+  char tempGraph[7];
+  if (!temperatureSensorError) {
+    createTemperatureGraph(tempGraph, currentTemperature, config.targetTemperature, config.deltaTemperature);
+  } else {
+    strcpy(tempGraph, "------");
+  }
+  
+  snprintf(relayStr, 21, "H:%s C:%s MENU %s", 
+           heaterRelayActive ? "ON " : "OFF",
+           coolerRelayActive ? "ON " : "OFF",
+           tempGraph);
+  lcd.print(relayStr);
 }
 
 void displaySettingsMenu() {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("=== SETTINGS ===");
   
-  lcd.setCursor(0, 1);
+  // RIGA 1: Titolo
+  lcd.setCursor(0, 0);
+  lcd.print("====== SETTINGS ====");
+  
+  // Menu items con nomi aggiornati
   const char* menuItems[] = {
-    ">Set Temperature",
-    ">Set Delta T    ",
-    ">Set Mode       ",
-    ">System ON/OFF  ",
-    ">Save & Exit    "
+    "Temperature",
+    "Delta T    ", 
+    "Mode       ",
+    "System     ",
+    "Diagnostic ",
+    "Save & Exit"
   };
-  lcd.print(menuItems[menuSelectionIndex]);
+  
+  // Mostra 3 opzioni contemporaneamente con scroll intelligente
+  for (int i = 0; i < 3; i++) {
+    int itemIndex = (menuSelectionIndex - 1 + i + 6) % 6;
+    lcd.setCursor(0, i + 1);
+    
+    char menuLine[21];
+    if (itemIndex == menuSelectionIndex) {
+      // Opzione selezionata con freccia
+      snprintf(menuLine, 21, ">%-11s %s", menuItems[itemIndex], getMenuValue(itemIndex));
+    } else {
+      // Opzioni non selezionate
+      snprintf(menuLine, 21, " %-11s %s", menuItems[itemIndex], getMenuValue(itemIndex));
+    }
+    lcd.print(menuLine);
+  }
 }
 
 void displayTemperatureSetting() {
   lcd.clear();
+  
+  // RIGA 1: Titolo
   lcd.setCursor(0, 0);
-  lcd.print("SET TEMPERATURE:");
+  lcd.print("===== TEMPERATURE ===");
+  
+  // RIGA 2: Valore corrente grande
   lcd.setCursor(0, 1);
-  lcd.printf("Target: %4.1f%cC  ", config.targetTemperature, (char)223);
+  char currentStr[21];
+  snprintf(currentStr, 21, "TARGET: %8.1f%cC", config.targetTemperature, (char)223);
+  lcd.print(currentStr);
+  
+  // RIGA 3: Range e step
+  lcd.setCursor(0, 2);
+  char rangeStr[21];
+  snprintf(rangeStr, 21, "RANGE:%.0f to %.0f%cC", TEMP_MIN, TEMP_MAX, (char)223);
+  lcd.print(rangeStr);
+  
+  // RIGA 4: Istruzioni + barra progresso
+  lcd.setCursor(0, 3);
+  char progressStr[21];
+  
+  // Barra progresso (10 caratteri)
+  char progressBar[11];
+  createProgressBar(progressBar, config.targetTemperature, TEMP_MIN, TEMP_MAX, 10);
+  
+  snprintf(progressStr, 21, "STEP:0.5 [%s]", progressBar);
+  lcd.print(progressStr);
 }
 
 void displayDeltaSetting() {
   lcd.clear();
+  
+  // RIGA 1: Titolo
   lcd.setCursor(0, 0);
-  lcd.print("SET DELTA T:    ");
+  lcd.print("====== DELTA T ======");
+  
+  // RIGA 2: Valore corrente
   lcd.setCursor(0, 1);
-  lcd.printf("Delta: %3.1f%cC   ", config.deltaTemperature, (char)223);
+  char currentStr[21];
+  snprintf(currentStr, 21, "HYSTERESIS: %c%.1f%cC", (char)177, config.deltaTemperature, (char)223);
+  lcd.print(currentStr);
+  
+  // RIGA 3: Spiegazione con range
+  lcd.setCursor(0, 2);
+  char rangeStr[21];
+  snprintf(rangeStr, 21, "RANGE: %.1f to %.1f%cC", DELTA_MIN, DELTA_MAX, (char)223);
+  lcd.print(rangeStr);
+  
+  // RIGA 4: Visualizzazione zone operative
+  lcd.setCursor(0, 3);
+  char zoneStr[21];
+  float target = config.targetTemperature;
+  float delta = config.deltaTemperature;
+  
+  if (config.operatingMode == 0) { // HEATER
+    snprintf(zoneStr, 21, "ON<%.1f OFF>%.1f%cC", target-delta, target, (char)223);
+  } else { // COOLER  
+    snprintf(zoneStr, 21, "OFF<%.1f ON>%.1f%cC", target, target+delta, (char)223);
+  }
+  lcd.print(zoneStr);
 }
 
 void displayModeSetting() {
   lcd.clear();
+  
+  // RIGA 1: Titolo
   lcd.setCursor(0, 0);
-  lcd.print("SET MODE:       ");
+  lcd.print("======= MODE ========");
+  
+  // RIGA 2: Modalità corrente con icone
   lcd.setCursor(0, 1);
-  lcd.print(config.operatingMode == 0 ? "Mode: HEATER   " : "Mode: COOLER   ");
+  char modeStr[21];
+  if (config.operatingMode == 0) {
+    lcd.write(CHAR_ARROW_UP);
+    snprintf(modeStr, 20, " HEATING MODE");
+  } else {
+    lcd.write(CHAR_ARROW_DOWN);
+    snprintf(modeStr, 20, " COOLING MODE");
+  }
+  lcd.print(modeStr);
+  
+  // RIGA 3: Descrizione dettagliata
+  lcd.setCursor(0, 2);
+  if (config.operatingMode == 0) {
+    lcd.print("HEAT when T < target");
+  } else {
+    lcd.print("COOL when T > target");
+  }
+  
+  // RIGA 4: Istruzioni e stato relay
+  lcd.setCursor(0, 3);
+  char statusStr[21];
+  const char* activeRelay = (config.operatingMode == 0) ? 
+    (heaterRelayActive ? "HEATER:ON " : "HEATER:OFF") :
+    (coolerRelayActive ? "COOLER:ON " : "COOLER:OFF");
+  snprintf(statusStr, 21, "ROTATE toggle %s", activeRelay);
+  lcd.print(statusStr);
 }
 
 void displaySystemStateSetting() {
   lcd.clear();
+  
+  // RIGA 1: Titolo
   lcd.setCursor(0, 0);
-  lcd.print("SYSTEM STATE:   ");
+  lcd.print("====== SYSTEM =======");
+  
+  // RIGA 2: Stato corrente
   lcd.setCursor(0, 1);
-  lcd.print(config.systemEnabled ? "System: ON     " : "System: OFF    ");
+  char statusStr[21];
+  snprintf(statusStr, 21, "STATUS: %s", config.systemEnabled ? "ENABLED " : "DISABLED");
+  lcd.print(statusStr);
+  
+  // RIGA 3: Info dettagliate
+  lcd.setCursor(0, 2);
+  if (config.systemEnabled) {
+    char activeStr[21];
+    snprintf(activeStr, 21, "Active:%s %.1f%cC", 
+             config.operatingMode == 0 ? "HEAT" : "COOL",
+             config.targetTemperature, (char)223);
+    lcd.print(activeStr);
+  } else {
+    lcd.print("Thermostat STANDBY  ");
+  }
+  
+  // RIGA 4: Warning o statistiche
+  lcd.setCursor(0, 3);
+  if (!config.systemEnabled) {
+    lcd.print("All relays DISABLED ");
+  } else {
+    char uptimeStr[21];
+    unsigned long totalMin = totalOnTime / 60000;
+    snprintf(uptimeStr, 21, "Runtime: %lu min    ", totalMin);
+    lcd.print(uptimeStr);
+  }
+}
+
+void displayDiagnosticScreen() {
+  lcd.clear();
+  
+  // RIGA 1: Titolo
+  lcd.setCursor(0, 0);
+  lcd.print("===== DIAGNOSTIC ===");
+  
+  // RIGA 2: Info hardware
+  lcd.setCursor(0, 1);
+  char hwStr[21];
+  snprintf(hwStr, 21, "CPU:%dMHz RAM:%dKB", ESP.getCpuFreqMHz(), ESP.getFreeHeap()/1024);
+  lcd.print(hwStr);
+  
+  // RIGA 3: Uptime e contatori
+  lcd.setCursor(0, 2);
+  char uptimeStr[21];
+  unsigned long uptime = millis() / 1000;
+  snprintf(uptimeStr, 21, "UP:%02d:%02d:%02d ENC:%d", 
+           (int)(uptime/3600), (int)((uptime%3600)/60), (int)(uptime%60),
+           abs(encoderPosition) % 1000);
+  lcd.print(uptimeStr);
+  
+  // RIGA 4: Status I2C e sensori
+  lcd.setCursor(0, 3);
+  char sensorStr[21];
+  snprintf(sensorStr, 21, "I2C:OK DS18:%s R:H%sC%s", 
+           temperatureSensorError ? "ERR" : "OK ",
+           heaterRelayActive ? "+" : "-",
+           coolerRelayActive ? "+" : "-");
+  lcd.print(sensorStr);
 }
 
 // ===== FUNZIONI PRINCIPALI =====
 void setup() {
+  // Salva tempo di avvio
+  systemStartTime = millis();
+  
   // Inizializzazione comunicazione seriale
   Serial.begin(115200);
   Serial.println("\n🚀 ===== TERMOSTATO INTELLIGENTE ESP32 =====");
-  Serial.println("📅 PlatformIO + Encoder POLLING + Pull-up 4.7kΩ");
+  Serial.println("📅 PlatformIO + LCD 4x20 + Encoder POLLING + Pull-up 4.7kΩ");
   Serial.printf("🔧 ESP32 Core Version: %s\n", ESP.getSdkVersion());
   
   // Informazioni board e chip
@@ -761,6 +1129,13 @@ void setup() {
   Serial.println("   └─ Pull-up esterne 4.7kΩ, interne disabilitate");
   Serial.println("   └─ Ottimizzato per alta velocità di rotazione");
   
+  // Informazioni display
+  Serial.println("🖥️ Configurazione display: LCD I2C 4x20");
+  Serial.println("   └─ Interfaccia professionale multi-livello");
+  Serial.println("   └─ Grafici ASCII e barre progresso");
+  Serial.println("   └─ Diagnostica hardware integrata");
+  Serial.println("   └─ Caratteri personalizzati");
+  
   // Inizializzazione componenti hardware
   setupEEPROM();
   setupHardware();
@@ -786,6 +1161,7 @@ void setup() {
   Serial.println("🔒 Sicurezza relay optoisolati attiva");
   Serial.println("🎛️ Encoder polling attivo - stabilità garantita ad alta velocità");
   Serial.println("🔄 Direzione encoder: ORARIO = +, ANTIORARIO = -");
+  Serial.println("🖥️ Interfaccia LCD 4x20 professionale attiva");
 }
 
 void loop() {
