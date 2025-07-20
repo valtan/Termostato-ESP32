@@ -79,7 +79,7 @@ void displaySystemStateSetting();
 
 // Sensore temperatura DS18B20 (OneWire)
 #define TEMP_SENSOR_PIN  19
-#define FREE_RELAY_PIN   18
+
 // Modulo relay 2 canali OPTOISOLATI (GTZ817C)
 #define RELAY_HEATER  32
 #define RELAY_COOLER  33
