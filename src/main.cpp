@@ -93,8 +93,8 @@ void displaySystemStateSetting();
 #define DEBOUNCE_DELAY        50      // ms - debounce pulsante encoder
 #define ENCODER_POLLING_INTERVAL 8    // ms - polling encoder ottimizzato (125Hz)
 
-#define TEMP_MIN             10.0f    // °C - temperatura minima configurabile
-#define TEMP_MAX             35.0f    // °C - temperatura massima configurabile
+#define TEMP_MIN             -50.0f    // °C - temperatura minima configurabile
+#define TEMP_MAX             150.0f    // °C - temperatura massima configurabile
 #define DELTA_MIN            0.5f     // °C - delta minimo configurabile
 #define DELTA_MAX            5.0f     // °C - delta massimo configurabile
 
