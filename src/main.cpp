@@ -104,7 +104,7 @@ void displaySystemStateSetting();
 // ===== CONFIGURAZIONE RELAY OPTOISOLATI =====
 // GTZ817C Optoaccoppiatori: logica invertita
 // HIGH = Relay OFF, LOW = Relay ON
-#define RELAY_LOGIC_INVERTED  true
+#define RELAY_LOGIC_INVERTED  false
 
 // ===== INIZIALIZZAZIONE OGGETTI =====
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, 16, 2);
@@ -131,6 +131,7 @@ bool coolerRelayActive = false;
 bool temperatureSensorError = false;
 unsigned long lastTemperatureRead = 0;
 unsigned long lastDisplayUpdate = 0;
+
 
 // Variabili encoder POLLING VERSION (NON più volatile)
 int encoderPosition = 0;
