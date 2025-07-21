@@ -1,3 +1,6 @@
+// ------------------------- ATTENZIONE  ------------------------//
+// SETTARE LOGICA RELAY_CORRETTA PER OPTOISOLATO O RELAY NORMALE //
+
 #include <Arduino.h>
 #include <LiquidCrystal_I2C.h>
 #include <OneWire.h>
@@ -100,7 +103,7 @@ void createTemperatureGraph(char* buffer, float current, float target, float del
 #define TEMP_SENSOR_PIN  19
 
 // MODIFICA: Modulo relay SINGOLO OPTOISOLATO (GTZ817C)
-#define RELAY_OUTPUT  32  // Un solo relè per heating/cooling
+#define RELAY_OUTPUT  33  // Un solo relè per heating/cooling
 
 // LED di stato sistema
 #define LED_STATUS  23
@@ -131,7 +134,7 @@ void createTemperatureGraph(char* buffer, float current, float target, float del
 // ===== CONFIGURAZIONE RELAY OPTOISOLATO =====
 // GTZ817C Optoaccoppiatore: logica invertita
 // HIGH = Relay OFF, LOW = Relay ON
-#define RELAY_LOGIC_INVERTED  true
+#define RELAY_LOGIC_INVERTED  false
 
 // ===== CARATTERI PERSONALIZZATI =====
 #define CHAR_THERMOMETER 0
